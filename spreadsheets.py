@@ -162,7 +162,11 @@ class GoogleSheetWorker:
         return response
 
     def _need_to_update_dataframe(self):
-        return (self._last_refresh_dataframe_time - time.time()) > self.REFRESH_TIMEDELTA
+        conditions = []
+        conditions.append((self._last_refresh_dataframe_time - time.time()) > self.REFRESH_TIMEDELTA)
+        conditions.append(self.sheet.row_count != self._dataframe.shape[0] + 1)
+        conditions.append(self.sheet.col_count != self._dataframe.shape[1])
+        return any(conditions)
 
     @property
     def dataframe(self):

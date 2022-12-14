@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from itertools import chain
 from typing import Any
-
 import dateutil.parser
-import geopandas as gpd
+import pandas as pd
 import gspread
 import gspread_dataframe
 import gspread_formatting as gsformat
@@ -16,14 +15,29 @@ from google_workers.config import auth
 from googleapiclient.discovery import build
 from gspread.exceptions import CellNotFound, APIError
 from shapely import wkt
+from enum import Enum, auto
+
+class GoogleSheetRowSearchStrategy(Enum):
+    CACHE = auto()
+    REQUEST = auto()
 
 
 class GoogleSheetWorker:
     BATCH_UPLOAD_SIZE = 5000
+    REFRESH_TIMEDELTA = 60 * 10
 
-    def __init__(self, spread_url=None, spread_id=None, sheet_id=None):
-        self.credentials = auth()
+    def __init__(self, spread_url=None, spread_id=None, sheet_id=None, search_strategy=None):
+        self.logger = logging.getLogger(self.__class__.__name__)
         self._aliases = None
+        self._dataframe = None
+        self._last_refresh_dataframe_time = 0
+        self.datetime_format = '%Y-%m-%d %H:%M:%S'
+        if search_strategy is None:
+            raise TypeError("search_strategy parameter is required")
+        self._search_strategy = None
+        self.search_strategy = search_strategy
+
+        self.credentials = auth()
         self.gspread_client = gspread.authorize(self.credentials)
         self.api_service = build('sheets', 'v4', credentials=self.credentials).spreadsheets()
 
@@ -42,11 +56,29 @@ class GoogleSheetWorker:
                     break
             else:
                 raise TypeError(f'Not found sheet with id={sheet_id}')
-        self.datetime_format = '%Y-%m-%d %H:%M:%S'
-        self.logger = logging.getLogger(self.__class__.__name__)
+
 
     def __repr__(self):
         return f'<GoogleSheetWorker(spread_id={self.spread_id}, sheet_name={self.sheet_name})>'
+
+    def __define_strategy(self, strat):
+        if strat == GoogleSheetRowSearchStrategy.CACHE:
+            self.find_rows_by_values = self._find_rows_by_cache
+            self.get_unique_values = self._get_unique_by_cache
+            self.get_headers = self._get_headers_by_cache
+        elif strat == GoogleSheetRowSearchStrategy.REQUEST:
+            self.find_rows_by_values = self._find_rows_by_request
+            self.get_unique_values = self._get_unique_by_request
+            self.get_headers = self._get_headers_by_request
+
+    @property
+    def search_strategy(self):
+        return self._search_strategy
+
+    @search_strategy.setter
+    def search_strategy(self, strat):
+        self.__define_strategy(strat)
+        self._search_strategy = strat
 
     @property
     def aliases(self):
@@ -58,7 +90,8 @@ class GoogleSheetWorker:
 
     @property
     def reverse_aliases(self):
-        return {v: k for k, v in self.aliases.items()}
+        if self.aliases:
+            return {v: k for k, v in self.aliases.items()}
 
     @property
     def spread_id(self):
@@ -90,9 +123,12 @@ class GoogleSheetWorker:
     def set_headers(self, values):
         self.sheet.insert_row(values, 1)
 
-    def get_headers(self):
+    def _get_headers_by_request(self):
         r = self.sheet.get('1:1')
         return r[0]
+
+    def _get_headers_by_cache(self):
+        return list(self.dataframe.columns)
 
     def get_worksheet_filters(self):
         r = self.api_service.get(spreadsheetId=self.spread_id).execute()
@@ -119,23 +155,31 @@ class GoogleSheetWorker:
             r = self.delete_sheet_filters(ids)
             return r
 
-
     def batch_update(self, requests):
         self.logger.debug('Batch update')
         body = {'requests': requests}
         response = self.api_service.batchUpdate(spreadsheetId=self.spread_id, body=body).execute()
         return response
 
+    def _need_to_update_dataframe(self):
+        return (self._last_refresh_dataframe_time - time.time()) > self.REFRESH_TIMEDELTA
 
-    def download_geodataframe(self):
-        df = self.download_dataframe()
-        geom = df['geometry'].apply(wkt.loads)
-        gdf = gpd.GeoDataFrame(df, geometry=geom)
-        return gdf
+    @property
+    def dataframe(self):
+        if self._dataframe is None or self._need_to_update_dataframe():
+            self.logger.debug('Update dataframe')
+            self._dataframe = gspread_dataframe.get_as_dataframe(self.sheet, evaluate_formulas=True)
+            self._dataframe.index += 2
+            self._last_refresh_dataframe_time = time.time()
+        return self._dataframe
 
-    def download_dataframe(self, skiprows=0):
-        df = gspread_dataframe.get_as_dataframe(self.sheet, evaluate_formulas=True, skiprows=skiprows)
-        return df
+    @property
+    def aliased_dataframe(self):
+        if self.reverse_aliases:
+            return self.dataframe.rename(self.reverse_aliases, axis=1)
+        else:
+            self.logger.warning('Alises not setted. Return original dataframe')
+            return self.dataframe
 
     def upload_dataframe(self, gdf):
         self.logger.info('Upload dataframe')
@@ -226,24 +270,30 @@ class GoogleSheetWorker:
             col_name = self.aliases[col_name]
         return self.get_headers().index(col_name) + 1
 
-    def find_rows_by_value(self, col_index: int, row_value: str):
+    def find_rows_by_value(self, col_value: str, row_value: str):
         '''
         Get row indexes which contain value in column
         '''
+        col_index = self.find_column(col_value)
         cells = self.sheet.findall(str(row_value), in_column=col_index)
         return [i.row for i in cells]
 
-    def find_rows_by_values(self, row_values: dict):
+    def _find_rows_by_request(self, row_values: dict):
         '''Get row indexes which contain values in many column in same time'''
         row_sets = []
         for k, v in row_values.items():
-            col = self.find_column(k)
-            rows = self.find_rows_by_value(col, v)
+            rows = self.find_rows_by_value(k, v)
             row_sets.append(set(rows))
         return set.intersection(*row_sets)
 
+    def _find_rows_by_cache(self, row_values: dict):
+        return set(self.aliased_dataframe.loc[
+                       (
+                               self.aliased_dataframe[row_values.keys()] == pd.Series(row_values)
+                       ).all(axis=1)
+                   ].index)
+
     def update_row_by_id(self, id_values: dict, update_values: dict):
-        '''SQL update implement'''
         id_rows = self.find_rows_by_values(id_values)
         if len(id_rows) == 0:
             raise CellNotFound(f'Not found row with values {id_values}')
@@ -255,29 +305,36 @@ class GoogleSheetWorker:
                 ws.update_cell(value_row, value_col, v)
 
     def insert_row_by_id(self, insert_values):
-        '''SQL insert implement'''
         # todo обновить функцию
-        ws = self.sheet
-        header_values = self.get_headers()
-        insert_values_sorted = []
-        for h in header_values:
-            insert_value = insert_values.get(h, None)
-            insert_value = self.value_formatter(insert_value)
-            insert_values_sorted.append(insert_value)
-        if ws.row_count <= 1:
-            ws.add_rows(1)
-        ws.insert_row(insert_values_sorted, index=2)
+        raise NotImplementedError()
+        # ws = self.sheet
+        # header_values = self.get_headers()
+        # insert_values_sorted = []
+        # for h in header_values:
+        #     insert_value = insert_values.get(h, None)
+        #     insert_value = self.value_formatter(insert_value)
+        #     insert_values_sorted.append(insert_value)
+        # if ws.row_count <= 1:
+        #     ws.add_rows(1)
+        # ws.insert_row(insert_values_sorted, index=2)
 
     def delete_row_by_id(self, id_values):
-        '''SQL delete implement'''
         # todo проверить корректность удаления (смещение массива)
-        for row in self.find_rows_by_values(id_values):
-            ws.delete_row(row)
+        raise NotImplementedError()
+        # for row in self.find_rows_by_values(id_values):
+        #     ws.delete_row(row)
 
-    def get_unique_values(self, column_index, include_header=False):
+    def _get_unique_by_request(self, column_index, include_header=False):
         v = self.sheet.col_values(column_index)
         if not include_header:
             v = v[1:]
+        return set(v)
+
+    def _get_unique_by_cache(self, column_index, include_header=False):
+        v = self.aliased_dataframe.iloc[:, column_index+1].unique()
+        if include_header:
+            col = self.aliased_dataframe.columns[column_index+1]
+            v = list(v).insert(0, col)
         return set(v)
 
     ### end: SQL methods
@@ -406,14 +463,18 @@ class GoogleSheetWorker:
         return hyperlinks
 
     def get_all_cells(self):
-        r = self.api_service.get(spreadsheetId=self.spread_id, ranges=f"'{self.sheet_name}'!1:{self.sheet.row_count}",
-                                 includeGridData=True).execute()
-        data = r['sheets'][0]['data'][0]
         cells = []
-        for row in data['rowData']:
-            if row.get('values', None):
-                row_cells = [GSCell.from_json(cell) for cell in row['values']]
-                cells.append(row_cells)
+        for i in range(1, self.sheet.row_count, self.BATCH_UPLOAD_SIZE):
+            r = self.api_service.get(
+                spreadsheetId=self.spread_id,
+                ranges=f"'{self.sheet_name}'!{i}:{i+self.BATCH_UPLOAD_SIZE}",
+                includeGridData=True
+            ).execute()
+            data = r['sheets'][0]['data'][0]
+            for row in data['rowData']:
+                if row.get('values', None):
+                    row_cells = [GSCell.from_json(cell) for cell in row['values']]
+                    cells.append(row_cells)
         grid = GSGrid(cells)
         return grid
 
@@ -465,7 +526,7 @@ class GSGrid:
         self.grid = grid
 
     def get_dataframe_by_property(self, property_name):
-        return gpd.pd.DataFrame([[getattr(cell, property_name) for cell in row] for row in self.grid])
+        return pd.DataFrame([[getattr(cell, property_name) for cell in row] for row in self.grid])
 
     def __getattr__(self, item):
         if item in self.grid[0][0].__annotations__.keys():

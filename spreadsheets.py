@@ -293,7 +293,7 @@ class GoogleSheetWorker:
     def _find_rows_by_cache(self, row_values: dict):
         return set(self.aliased_dataframe.loc[
                        (
-                               self.aliased_dataframe[row_values.keys()] == pd.Series(row_values)
+                               self.aliased_dataframe[row_values.keys()].astype(str) == pd.Series(row_values).astype(str)
                        ).all(axis=1)
                    ].index)
 

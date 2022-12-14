@@ -16,6 +16,7 @@ from googleapiclient.discovery import build
 from gspread.exceptions import CellNotFound, APIError
 from shapely import wkt
 from enum import Enum, auto
+from threading import get_ident, Lock
 
 class GoogleSheetRowSearchStrategy(Enum):
     CACHE = auto()
@@ -30,6 +31,7 @@ class GoogleSheetWorker:
         self.logger = logging.getLogger(self.__class__.__name__)
         self._aliases = None
         self._dataframe = None
+        self._lock = Lock()
         self._last_refresh_dataframe_time = 0
         self.datetime_format = '%Y-%m-%d %H:%M:%S'
         if search_strategy is None:
@@ -56,6 +58,7 @@ class GoogleSheetWorker:
                     break
             else:
                 raise TypeError(f'Not found sheet with id={sheet_id}')
+        self._sheet = self._init_sheet()
 
 
     def __repr__(self):
@@ -97,8 +100,7 @@ class GoogleSheetWorker:
     def spread_id(self):
         return self.spread.id
 
-    @property
-    def sheet(self):
+    def _init_sheet(self):
         try:
             if self.sheet_name:
                 return self.spread.worksheet(self.sheet_name)
@@ -107,10 +109,14 @@ class GoogleSheetWorker:
         except APIError as e:
             if e.response.json()['error'].get('code') == 429:
                 self.logger.debug('Quota exceeded')
-                time.sleep(30)
-                return self.sheet
+                time.sleep(10)
+                return self._init_sheet()
             else:
                 raise e
+
+    @property
+    def sheet(self):
+        return self._sheet
 
     @property
     def sheet_id(self):
@@ -168,14 +174,19 @@ class GoogleSheetWorker:
         conditions.append(self.sheet.col_count != self._dataframe.shape[1])
         return any(conditions)
 
+    def _update_dataframe(self):
+        self.logger.debug(f'Update dataframe by thread {get_ident()}')
+        self._dataframe = gspread_dataframe.get_as_dataframe(self.sheet, evaluate_formulas=True)
+        self._dataframe.index += 2
+        self._last_refresh_dataframe_time = time.time()
+        self.logger.debug(f'Finish to update dataframe by thread {get_ident()}')
+
     @property
     def dataframe(self):
-        if self._dataframe is None or self._need_to_update_dataframe():
-            self.logger.debug('Update dataframe')
-            self._dataframe = gspread_dataframe.get_as_dataframe(self.sheet, evaluate_formulas=True)
-            self._dataframe.index += 2
-            self._last_refresh_dataframe_time = time.time()
-        return self._dataframe
+        with self._lock:
+            if self._dataframe is None or self._need_to_update_dataframe():
+                self._update_dataframe()
+            return self._dataframe
 
     @property
     def aliased_dataframe(self):

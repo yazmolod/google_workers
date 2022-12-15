@@ -25,7 +25,7 @@ class GoogleSheetRowSearchStrategy(Enum):
 
 class GoogleSheetWorker:
     BATCH_UPLOAD_SIZE = 5000
-    REFRESH_TIMEDELTA = 60 * 10
+    REFRESH_TIMEDELTA = 60 * 60
 
     def __init__(self, spread_url=None, spread_id=None, sheet_id=None, search_strategy=None):
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -281,6 +281,7 @@ class GoogleSheetWorker:
             return v
 
     def find_column(self, col_name: str):
+        self.logger.debug(f'Search column {col_name}')
         if self.aliases:
             col_name = self.aliases[col_name]
         return self.get_headers().index(col_name) + 1
@@ -295,6 +296,7 @@ class GoogleSheetWorker:
 
     def _find_rows_by_request(self, row_values: dict):
         '''Get row indexes which contain values in many column in same time'''
+        self.logger.debug(f'Finding rows by values {row_values} [request]')
         row_sets = []
         for k, v in row_values.items():
             rows = self.find_rows_by_value(k, v)
@@ -302,22 +304,31 @@ class GoogleSheetWorker:
         return set.intersection(*row_sets)
 
     def _find_rows_by_cache(self, row_values: dict):
-        return set(self.aliased_dataframe.loc[
-                       (
-                               self.aliased_dataframe[row_values.keys()].astype(str) == pd.Series(row_values).astype(str)
+        self.logger.debug(f'Finding rows by values {row_values} [cache]')
+        rows = set(self.aliased_dataframe.loc[(
+                           self.aliased_dataframe[row_values.keys()].astype(str) == pd.Series(row_values).astype(str)
                        ).all(axis=1)
                    ].index)
+        #check cache is valid
+        for row in rows:
+            for k,v in row_values.items():
+                cell_value = self.sheet.cell(row, self.find_column(k)).value
+                if str(cell_value) != str(v):
+                    self.logger.info(f'Cell values mismatch {v} - {cell_value}. Updating dataframe and repeat...')
+                    self._update_dataframe()
+                    return self._find_rows_by_cache(row_values)
+        return rows
 
     def update_row_by_id(self, id_values: dict, update_values: dict):
+        self.logger.debug(f'Updating rows {id_values} - {update_values}')
         id_rows = self.find_rows_by_values(id_values)
         if len(id_rows) == 0:
             raise CellNotFound(f'Not found row with values {id_values}')
-        ws = self.sheet
-        for k, v in update_values.items():
+        for k,v in update_values.items():
             value_col = self.find_column(k)
             for value_row in id_rows:
                 v = self.value_formatter(v)
-                ws.update_cell(value_row, value_col, v)
+                self.sheet.update_cell(value_row, value_col, v)
 
     def insert_row_by_id(self, insert_values):
         # todo обновить функцию

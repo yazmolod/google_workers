@@ -9,6 +9,7 @@ from typing import Any
 import dateutil.parser
 import pandas as pd
 import gspread
+import gspread.utils
 import gspread_dataframe
 import gspread_formatting as gsformat
 from google_workers.config import auth
@@ -31,6 +32,7 @@ class GoogleSheetWorker:
         self.logger = logging.getLogger(self.__class__.__name__)
         self._aliases = None
         self._dataframe = None
+        self._color_dataframe = None
         self._lock = Lock()
         self._last_refresh_dataframe_time = 0
         self.datetime_format = '%Y-%m-%d %H:%M:%S'
@@ -58,7 +60,7 @@ class GoogleSheetWorker:
                     break
             else:
                 raise TypeError(f'Not found sheet with id={sheet_id}')
-        self._sheet = self._init_sheet()
+        self.refresh_sheet()
 
 
     def __repr__(self):
@@ -100,17 +102,18 @@ class GoogleSheetWorker:
     def spread_id(self):
         return self.spread.id
 
-    def _init_sheet(self):
+    def refresh_sheet(self):
         try:
             if self.sheet_name:
-                return self.spread.worksheet(self.sheet_name)
+                self._sheet = self.spread.worksheet(self.sheet_name)
             else:
-                return self.spread.sheet1
+                self._sheet = self.spread.sheet1
+            return self._sheet
         except APIError as e:
             if e.response.json()['error'].get('code') == 429:
                 self.logger.debug('Quota exceeded')
                 time.sleep(10)
-                return self._init_sheet()
+                return self.refresh_sheet()
             else:
                 raise e
 
@@ -135,6 +138,10 @@ class GoogleSheetWorker:
 
     def _get_headers_by_cache(self):
         return list(self.dataframe.columns)
+    
+    def get_aliased_headers(self):
+        a = self.reverse_aliases
+        return [a[k] for k in self.get_headers()]
 
     def get_worksheet_filters(self):
         r = self.api_service.get(spreadsheetId=self.spread_id).execute()
@@ -196,10 +203,10 @@ class GoogleSheetWorker:
             self.logger.warning('Alises not setted. Return original dataframe')
             return self.dataframe
 
-    def upload_dataframe(self, gdf):
+    def upload_dataframe(self, gdf, start_row_index=0):
         self.logger.info('Upload dataframe')
+        self.refresh_sheet()  # необходимо актуализировать перед изменениями
         # подготавливаем данные - строки больше 5000 недопустимы
-        boolean_ranges = []
         for ic, c in enumerate(gdf.columns):
             series = gdf[c].dropna()
             if len(series) > 0:
@@ -207,11 +214,6 @@ class GoogleSheetWorker:
                 sdt = str(series.dtype)
                 if 'datetime' in sdt:
                     gdf[c] = gdf[c].dt.strftime(self.datetime_format)
-                elif 'bool' in sdt:
-                    last_row = len(gdf) + 1
-                    col = string.ascii_uppercase[ic]
-                    cell_range = f'{col}2:{col}{last_row}'
-                    boolean_ranges.append(cell_range)
                 elif 'object' in sdt:
                     try:
                         gdf[c] = gdf[c].str[:5000]
@@ -219,14 +221,13 @@ class GoogleSheetWorker:
                         pass
         for i in range(0, len(gdf), self.BATCH_UPLOAD_SIZE):
             self.logger.debug(f'Upload dataframe: {i} - {i + self.BATCH_UPLOAD_SIZE} [{len(gdf)}]')
-            start_row = 2 + i
-            if self.sheet.row_count < start_row:
-                self.sheet.add_rows(start_row - self.sheet.row_count)
-            gspread_dataframe.set_with_dataframe(self.sheet, gdf.iloc[i:i + self.BATCH_UPLOAD_SIZE], row=2 + i,
-                                                 include_column_header=False, include_index=False)
-        self.format_table(boolean_ranges)
+            current_start_row = 2 + start_row_index + i
+            if self.sheet.row_count < current_start_row:
+                self.sheet.add_rows(current_start_row - self.sheet.row_count)
+            gspread_dataframe.set_with_dataframe(self.sheet, gdf.iloc[i:i + self.BATCH_UPLOAD_SIZE], row=current_start_row,
+                                                 include_column_header=False, include_index=False, resize=False)
 
-    def format_table(self, boolean_ranges=[]):
+    def format_table(self, boolean_сolumns=[]):
         self.logger.info('Format table')
         ws = self.sheet
         header_format = gsformat.cellFormat(
@@ -239,14 +240,18 @@ class GoogleSheetWorker:
             textFormat=gsformat.textFormat(bold=False),
             horizontalAlignment='LEFT'
         )
-        gsformat.format_cell_range(ws, f"1:{ws.row_count}", cell_format)
-        gsformat.format_cell_range(ws, f"1:1", header_format)
-        for boolean_range in boolean_ranges:
+        gsformat.format_cell_range(self.sheet, f"1:{self.sheet.row_count}", cell_format)
+        gsformat.format_cell_range(self.sheet, f"1:1", header_format)
+        for boolean_сolumn in boolean_сolumns:
+            col_index = self.get_aliased_headers().index(boolean_сolumn) + 1
+            a1_cell = gspread.utils.rowcol_to_a1(1, col_index)
+            col_label = re.findall(r'[A-Z]+', a1_cell)[0]
+            boolean_range = f'{col_label}:{col_label}'
             validation_rule = gsformat.DataValidationRule(
                 gsformat.BooleanCondition('BOOLEAN', []),
                 showCustomUi=True
             )
-            gsformat.set_data_validation_for_cell_range(ws, boolean_range, validation_rule)
+            gsformat.set_data_validation_for_cell_range(self.sheet, boolean_range, validation_rule)
 
     ### start: SQL methods
 

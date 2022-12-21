@@ -8,6 +8,7 @@ from itertools import chain
 from typing import Any
 import dateutil.parser
 import pandas as pd
+import numpy as np
 import gspread
 import gspread.utils
 import gspread_dataframe
@@ -32,8 +33,8 @@ class GoogleSheetWorker:
         self.logger = logging.getLogger(self.__class__.__name__)
         self._aliases = None
         self._dataframe = None
-        self._color_dataframe = None
         self._lock = Lock()
+        self._raw_grid = None
         self._last_refresh_dataframe_time = 0
         self.datetime_format = '%Y-%m-%d %H:%M:%S'
         if search_strategy is None:
@@ -101,6 +102,23 @@ class GoogleSheetWorker:
     @property
     def spread_id(self):
         return self.spread.id
+
+    @property
+    def raw_grid(self):
+        if self._raw_grid is None:
+            self.update_raw_grid()
+        return self._raw_grid
+
+    @property
+    def color_dataframe(self):
+        df = self.raw_grid.get_dataframe_by_property('background_color')
+        df.columns = df.iloc[0]
+        df.columns.index = None
+        df = df.drop(0, axis=0)
+        df.index += 1
+        rows, cols = self.dataframe.shape
+        df = df.iloc[:rows, :cols]
+        return df
 
     def refresh_sheet(self):
         try:
@@ -183,8 +201,22 @@ class GoogleSheetWorker:
 
     def _update_dataframe(self):
         self.logger.debug(f'Update dataframe by thread {get_ident()}')
-        self._dataframe = gspread_dataframe.get_as_dataframe(self.sheet, evaluate_formulas=True)
-        self._dataframe.index += 2
+        self.refresh_sheet()
+        # gspread_dataframe уродует типы данных, поэтому делаем все сами
+        values = self.sheet.get_all_values()
+        # внимание костыль
+        # делаем размер датафрейма соответствующим размерам таблицы
+        # чтобы не тригерить обновление кэша из-за несовпадения размера
+        # (в таблицах где есть пустые строки или столбцы это происходит)
+        for i in range(self.sheet.row_count - len(values)):
+            values.append([np.nan] * self.sheet.col_count)
+        df = pd.DataFrame(values)
+        df.index += 1
+        df.columns = df.iloc[0]
+        df.columns.name = None
+        df = df.iloc[1:]
+        df = df.replace('', pd.np.nan)
+        self._dataframe = df
         self._last_refresh_dataframe_time = time.time()
         self.logger.debug(f'Finish to update dataframe by thread {get_ident()}')
 
@@ -198,7 +230,8 @@ class GoogleSheetWorker:
     @property
     def aliased_dataframe(self):
         if self.reverse_aliases:
-            return self.dataframe.rename(self.reverse_aliases, axis=1)
+            df = self.dataframe.rename(self.reverse_aliases, axis=1)
+            return df.loc[:, self.aliases]
         else:
             self.logger.warning('Alises not setted. Return original dataframe')
             return self.dataframe
@@ -493,7 +526,8 @@ class GoogleSheetWorker:
             hyperlinks.append(rows_hyperlinks)
         return hyperlinks
 
-    def get_all_cells(self):
+    def update_raw_grid(self):
+        self.logger.debug('Init raw grid')
         cells = []
         for i in range(1, self.sheet.row_count, self.BATCH_UPLOAD_SIZE):
             r = self.api_service.get(
@@ -506,8 +540,8 @@ class GoogleSheetWorker:
                 if row.get('values', None):
                     row_cells = [GSCell.from_json(cell) for cell in row['values']]
                     cells.append(row_cells)
-        grid = GSGrid(cells)
-        return grid
+        self._raw_grid = GSGrid(cells)
+        return self._raw_grid
 
 
 ##########################################################################

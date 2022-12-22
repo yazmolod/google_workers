@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from gspread.exceptions import CellNotFound, APIError
 from shapely import wkt
 from enum import Enum, auto
+from colour import Color
 from threading import get_ident, Lock
 
 class GoogleSheetRowSearchStrategy(Enum):
@@ -29,18 +30,25 @@ class GoogleSheetWorker:
     BATCH_UPLOAD_SIZE = 5000
     REFRESH_TIMEDELTA = 60 * 60
 
-    def __init__(self, spread_url=None, spread_id=None, sheet_id=None, search_strategy=None):
+    def __init__(
+            self,
+            spread_url=None,
+            spread_id=None,
+            sheet_id=None,
+            search_strategy=GoogleSheetRowSearchStrategy.CACHE,
+            aliases=None
+            ):
         self.logger = logging.getLogger(self.__class__.__name__)
-        self._aliases = None
+
         self._dataframe = None
         self._lock = Lock()
         self._raw_grid = None
         self._last_refresh_dataframe_time = 0
         self.datetime_format = '%Y-%m-%d %H:%M:%S'
-        if search_strategy is None:
-            raise TypeError("search_strategy parameter is required")
         self._search_strategy = None
         self.search_strategy = search_strategy
+        self._aliases = None
+        self.aliases = aliases
 
         self.credentials = auth()
         self.gspread_client = gspread.authorize(self.credentials)
@@ -112,12 +120,12 @@ class GoogleSheetWorker:
     @property
     def color_dataframe(self):
         df = self.raw_grid.get_dataframe_by_property('background_color')
-        df.columns = df.iloc[0]
-        df.columns.index = None
         df = df.drop(0, axis=0)
         df.index += 1
         rows, cols = self.dataframe.shape
         df = df.iloc[:rows, :cols]
+        df = df.applymap(lambda x: Color('#'+x), na_action='ignore')
+        df.columns = self.get_headers()[:len(df.columns)]
         return df
 
     def refresh_sheet(self):
@@ -215,7 +223,7 @@ class GoogleSheetWorker:
         df.columns = df.iloc[0]
         df.columns.name = None
         df = df.iloc[1:]
-        df = df.replace('', pd.np.nan)
+        df = df.replace('', np.nan)
         self._dataframe = df
         self._last_refresh_dataframe_time = time.time()
         self.logger.debug(f'Finish to update dataframe by thread {get_ident()}')

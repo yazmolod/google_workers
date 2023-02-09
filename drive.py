@@ -1,7 +1,7 @@
 import httplib2
 from googleapiclient.discovery import build
 from pydrive.drive import GoogleDrive
-from google_workers.config import auth
+from google_workers.api import auth
 
 
 class GoogleAuthCopycat:

@@ -5,6 +5,7 @@ from datetime import datetime
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 from oauth2client.client import GoogleCredentials
 from pathlib import Path
 
@@ -50,3 +51,15 @@ def auth():
             user_agent='Python client library')
 
     return oauth_creds
+
+
+def get_service(service_name):
+    creds = auth()
+    if service_name == 'slides':
+        return build(service_name, 'v1', credentials=creds).presentations()
+    elif service_name == 'sheets':
+        return build(service_name, 'v4', credentials=creds).spreadsheets()
+    elif service_name == 'drive':
+        return build(service_name, 'v3', credentials=creds)
+    else:
+        raise NotImplementedError

@@ -13,7 +13,7 @@ import gspread
 import gspread.utils
 import gspread_dataframe
 import gspread_formatting as gsformat
-from google_workers.config import auth
+from google_workers.api import auth, get_service
 from googleapiclient.discovery import build
 from gspread.exceptions import CellNotFound, APIError
 from shapely import wkt
@@ -52,7 +52,7 @@ class GoogleSheetWorker:
 
         self.credentials = auth()
         self.gspread_client = gspread.authorize(self.credentials)
-        self.api_service = build('sheets', 'v4', credentials=self.credentials).spreadsheets()
+        self.api_service = get_service('sheets')
 
         if spread_url:
             self.spread = self.gspread_client.open_by_url(spread_url)
@@ -245,7 +245,6 @@ class GoogleSheetWorker:
             return self.dataframe
 
     def upload_dataframe(self, gdf, start_row_index=0):
-        self.logger.info('Upload dataframe')
         self.refresh_sheet()  # необходимо актуализировать перед изменениями
         # подготавливаем данные - строки больше 5000 недопустимы
         for ic, c in enumerate(gdf.columns):
@@ -530,7 +529,10 @@ class GoogleSheetWorker:
                                  includeGridData=True).execute()
         hyperlinks = []
         for row_data in r['sheets'][0]['data'][0]['rowData']:
-            rows_hyperlinks = [i.get('hyperlink', None) for i in row_data['values']]
+            if 'values' in row_data:
+                rows_hyperlinks = [i.get('hyperlink', None) for i in row_data['values']]
+            else:
+                rows_hyperlinks = [None]
             hyperlinks.append(rows_hyperlinks)
         return hyperlinks
 

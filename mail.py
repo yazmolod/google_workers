@@ -1,5 +1,5 @@
 from simplegmail import Gmail
-from google_workers.config import auth
+from google_workers.api import auth
 
 
 class GoogleMailWorker:

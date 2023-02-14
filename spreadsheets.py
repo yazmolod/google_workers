@@ -36,7 +36,8 @@ class GoogleSheetWorker:
             spread_id=None,
             sheet_id=None,
             search_strategy=GoogleSheetRowSearchStrategy.CACHE,
-            aliases=None
+            aliases=None,
+            header_row=1,
             ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -49,6 +50,7 @@ class GoogleSheetWorker:
         self.search_strategy = search_strategy
         self._aliases = None
         self.aliases = aliases
+        self.header_row = header_row
 
         self.credentials = auth()
         self.gspread_client = gspread.authorize(self.credentials)
@@ -152,14 +154,14 @@ class GoogleSheetWorker:
         return self.sheet.id
 
     def replace_headers(self, values):
-        self.sheet.delete_row(1)
-        self.sheet.insert_row(values, 1)
+        self.sheet.delete_row(self.header_row)
+        self.sheet.insert_row(values, self.header_row)
 
     def set_headers(self, values):
-        self.sheet.insert_row(values, 1)
+        self.sheet.insert_row(values, self.header_row)
 
     def _get_headers_by_request(self):
-        r = self.sheet.get('1:1')
+        r = self.sheet.get(f'{self.header_row}:{self.header_row}')
         return r[0]
 
     def _get_headers_by_cache(self):
@@ -203,7 +205,7 @@ class GoogleSheetWorker:
     def _need_to_update_dataframe(self):
         conditions = []
         conditions.append((self._last_refresh_dataframe_time - time.time()) > self.REFRESH_TIMEDELTA)
-        conditions.append(self.sheet.row_count != self._dataframe.shape[0] + 1)
+        conditions.append(self.sheet.row_count != self._dataframe.shape[0] + self.header_row)
         conditions.append(self.sheet.col_count != self._dataframe.shape[1])
         return any(conditions)
 
@@ -220,9 +222,9 @@ class GoogleSheetWorker:
             values.append([np.nan] * self.sheet.col_count)
         df = pd.DataFrame(values)
         df.index += 1
-        df.columns = df.iloc[0]
+        df.columns = df.iloc[self.header_row-1]
         df.columns.name = None
-        df = df.iloc[1:]
+        df = df.iloc[self.header_row:]
         df = df.replace('', np.nan)
         self._dataframe = df
         self._last_refresh_dataframe_time = time.time()
@@ -261,7 +263,7 @@ class GoogleSheetWorker:
                         pass
         for i in range(0, len(gdf), self.BATCH_UPLOAD_SIZE):
             self.logger.debug(f'Upload dataframe: {i} - {i + self.BATCH_UPLOAD_SIZE} [{len(gdf)}]')
-            current_start_row = 2 + start_row_index + i
+            current_start_row = self.header_row + 1 + start_row_index + i
             if self.sheet.row_count < current_start_row:
                 self.sheet.add_rows(current_start_row - self.sheet.row_count)
             gspread_dataframe.set_with_dataframe(self.sheet, gdf.iloc[i:i + self.BATCH_UPLOAD_SIZE], row=current_start_row,
@@ -280,8 +282,8 @@ class GoogleSheetWorker:
             textFormat=gsformat.textFormat(bold=False),
             horizontalAlignment='LEFT'
         )
-        gsformat.format_cell_range(self.sheet, f"1:{self.sheet.row_count}", cell_format)
-        gsformat.format_cell_range(self.sheet, f"1:1", header_format)
+        gsformat.format_cell_range(self.sheet, f"{self.header_row}:{self.sheet.row_count}", cell_format)
+        gsformat.format_cell_range(self.sheet, f"{self.header_row}:{self.header_row}", header_format)
         for boolean_сolumn in boolean_сolumns:
             col_index = self.get_aliased_headers().index(boolean_сolumn) + 1
             a1_cell = gspread.utils.rowcol_to_a1(1, col_index)
@@ -411,8 +413,7 @@ class GoogleSheetWorker:
     ### end: SQL methods
 
     def generate_filter_request(self, filter_name, sql):
-        headers = self.get_headers()
-        headers = [self.reverse_aliases[i] for i in headers]
+        headers = self.get_aliased_headers()
         equal_operators = {
             '=': [
                 (lambda x: isinstance(x, (int, float)), 'NUMBER_EQ'),

@@ -13,6 +13,7 @@ import gspread
 import gspread.utils
 import gspread_dataframe
 import gspread_formatting as gsformat
+from gspread_formatting import CellFormat, TextFormat, format_cell_ranges, Link, Color as ColorFormatting
 from google_workers.api import auth, get_service
 from googleapiclient.discovery import build
 from gspread.exceptions import CellNotFound, APIError
@@ -20,6 +21,7 @@ from shapely import wkt
 from enum import Enum, auto
 from colour import Color
 from threading import get_ident, Lock
+from openpyxl.utils.cell import get_column_letter
 
 class GoogleSheetRowSearchStrategy(Enum):
     CACHE = auto()
@@ -130,6 +132,22 @@ class GoogleSheetWorker:
         df.columns = self.get_headers()[:len(df.columns)]
         return df
 
+    @property
+    def url(self):
+        return f'https://docs.google.com/spreadsheets/d/{self.spread_id}/edit#gid={self.sheet_id}'
+
+    @staticmethod
+    def generate_hyperlink_format(hyperlink):
+        cell_format = CellFormat(
+            textFormat=TextFormat(
+                link=Link(hyperlink),
+                underline=True,
+                foregroundColor=ColorFormatting.fromHex('#1155cc')
+            ),
+            hyperlinkDisplayType='LINKED',
+        )
+        return cell_format
+
     def refresh_sheet(self):
         try:
             if self.sheet_name:
@@ -152,6 +170,10 @@ class GoogleSheetWorker:
     @property
     def sheet_id(self):
         return self.sheet.id
+
+    @property
+    def first_row(self):
+        return self.header_row + 1
 
     def replace_headers(self, values):
         self.sheet.delete_row(self.header_row)
@@ -263,7 +285,7 @@ class GoogleSheetWorker:
                         pass
         for i in range(0, len(gdf), self.BATCH_UPLOAD_SIZE):
             self.logger.debug(f'Upload dataframe: {i} - {i + self.BATCH_UPLOAD_SIZE} [{len(gdf)}]')
-            current_start_row = self.header_row + 1 + start_row_index + i
+            current_start_row = self.first_row + start_row_index + i
             if self.sheet.row_count < current_start_row:
                 self.sheet.add_rows(current_start_row - self.sheet.row_count)
             gspread_dataframe.set_with_dataframe(self.sheet, gdf.iloc[i:i + self.BATCH_UPLOAD_SIZE], row=current_start_row,
@@ -525,6 +547,10 @@ class GoogleSheetWorker:
         }
         return request
 
+    def extract_column_hyperlink(self, icol):
+        acol = get_column_letter(icol)
+        return self.extract_hyperlink(f'{acol}:{acol}')
+
     def extract_hyperlink(self, cell_range):
         r = self.api_service.get(spreadsheetId=self.spread_id, ranges=f"'{self.sheet_name}'!{cell_range}",
                                  includeGridData=True).execute()
@@ -536,6 +562,44 @@ class GoogleSheetWorker:
                 rows_hyperlinks = [None]
             hyperlinks.append(rows_hyperlinks)
         return hyperlinks
+
+    def get_hyperlink_dataframe(self):
+        self.logger.debug(f'Download spreadsheet hyper dataframe...')
+        resp_step = 1000
+        total_rows, total_cols = self.dataframe.shape
+        first_acol = 'A'
+        last_acol = get_column_letter(total_cols)
+        first_row = self.first_row
+        last_row = self.header_row + total_rows
+        hypers = []
+        for i in range(first_row-1, last_row, resp_step):
+            r = f'{first_acol}{i + 1}:{last_acol}{i + resp_step}'
+            self.logger.debug(f'Hyperlinks parse: {r}')
+            hypers += self.extract_hyperlink(r)
+        hdf = pd.DataFrame(hypers, columns=self.get_headers())
+        hdf.index += self.first_row
+        return hdf
+    
+    def set_column_hyperlinks(self, icol, hyperlinks):
+        acol = get_column_letter(icol)
+        self.set_hyperlinks(f'{acol}:{acol}', hyperlinks)
+
+    def set_hyperlinks(self, cell_range, hyperlinks):
+        updates = []
+        cells = self.sheet.range(cell_range)
+        assert len(cells) == len(hyperlinks)
+        updates = [(cells[i].address, self.generate_hyperlink_format(hyperlinks[i])) for i in range(len(cells))]
+        format_cell_ranges(self.sheet, updates)
+
+    def set_hyperlinks_dataframe(self, hdf):
+        updates = []
+        for c in hdf.columns:
+            if len(hdf[c].dropna()) > 0:
+                icol = self.find_column(c.replace('#href', ''))
+                acol = get_column_letter(icol)
+                for i,v in hdf[c].dropna().iteritems():
+                    updates.append((f'{acol}{i}', self.generate_hyperlink_format(v)))
+        format_cell_ranges(self.sheet, updates)
 
     def update_raw_grid(self):
         self.logger.debug('Init raw grid')

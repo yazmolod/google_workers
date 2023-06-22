@@ -231,7 +231,7 @@ class GoogleSheetWorker:
         conditions.append(self.sheet.col_count != self._dataframe.shape[1])
         return any(conditions)
 
-    def _update_dataframe(self):
+    def update_dataframe(self):
         self.logger.debug(f'Update dataframe by thread {get_ident()}')
         self.refresh_sheet()
         # gspread_dataframe уродует типы данных, поэтому делаем все сами
@@ -256,7 +256,7 @@ class GoogleSheetWorker:
     def dataframe(self):
         with self._lock:
             if self._dataframe is None or self._need_to_update_dataframe():
-                self._update_dataframe()
+                self.update_dataframe()
             return self._dataframe
 
     @property
@@ -265,7 +265,7 @@ class GoogleSheetWorker:
             df = self.dataframe.rename(self.reverse_aliases, axis=1)
             return df.loc[:, self.aliases]
         else:
-            self.logger.warning('Alises not setted. Return original dataframe')
+            self.logger.debug('Alises not setted. Return original dataframe')
             return self.dataframe
 
     def upload_dataframe(self, gdf, start_row_index=0):
@@ -384,7 +384,7 @@ class GoogleSheetWorker:
                 cell_value = self.sheet.cell(row, self.find_column(k)).value
                 if str(cell_value) != str(v):
                     self.logger.info(f'Cell values mismatch {v} - {cell_value}. Updating dataframe and repeat...')
-                    self._update_dataframe()
+                    self.update_dataframe()
                     return self._find_rows_by_cache(row_values)
         return rows
 

@@ -131,3 +131,4 @@ dmypy.json
 /configs/google_secret.json
 /configs/gapi_creds.json
 .idea/
+_spreadsheet_cache/

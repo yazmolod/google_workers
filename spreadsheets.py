@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import chain
-from typing import Any
+from typing import Any, Optional
 import dateutil.parser
 import pandas as pd
 import numpy as np
@@ -22,6 +22,7 @@ from enum import Enum, auto
 from colour import Color
 from threading import get_ident, Lock
 from openpyxl.utils.cell import get_column_letter
+from pathlib import Path
 
 class GoogleSheetRowSearchStrategy(Enum):
     CACHE = auto()
@@ -30,7 +31,8 @@ class GoogleSheetRowSearchStrategy(Enum):
 
 class GoogleSheetWorker:
     BATCH_UPLOAD_SIZE = 5000
-    REFRESH_TIMEDELTA = 60 * 60
+    SPREADSHEETS_CACHE_FOLDER = (Path(__file__).parent / '_spreadsheet_cache').resolve()
+    SPREADSHEETS_CACHE_FOLDER.mkdir(exist_ok=True)
 
     def __init__(
             self,
@@ -148,6 +150,21 @@ class GoogleSheetWorker:
         )
         return cell_format
 
+    def _get_cache_filepath(self) -> Path:
+        return self.SPREADSHEETS_CACHE_FOLDER / f'{self.spread_id}_{self.sheet_id}.pickle'
+
+    def _save_cache(self) -> None:
+        self.logger.debug('Save cache...')
+        cache_path = self._get_cache_filepath()
+        self._dataframe.to_pickle(cache_path)
+
+    def _load_cache(self) -> Optional[pd.DataFrame]:
+        self.logger.debug('Read cache...')
+        cache_path = self._get_cache_filepath()
+        if cache_path.exists():
+            df = pd.read_pickle(cache_path)
+            return df
+
     def refresh_sheet(self):
         try:
             if self.sheet_name:
@@ -226,7 +243,6 @@ class GoogleSheetWorker:
 
     def _need_to_update_dataframe(self):
         conditions = []
-        conditions.append((self._last_refresh_dataframe_time - time.time()) > self.REFRESH_TIMEDELTA)
         conditions.append(self.sheet.row_count != self._dataframe.shape[0] + self.header_row)
         conditions.append(self.sheet.col_count != self._dataframe.shape[1])
         return any(conditions)
@@ -250,12 +266,19 @@ class GoogleSheetWorker:
         df = df.replace('', np.nan)
         self._dataframe = df
         self._last_refresh_dataframe_time = time.time()
+        self._save_cache()
         self.logger.debug(f'Finish to update dataframe by thread {get_ident()}')
 
     @property
     def dataframe(self):
         with self._lock:
-            if self._dataframe is None or self._need_to_update_dataframe():
+            if self._dataframe is None:
+                cache_df = self._load_cache()
+                if cache_df is None:
+                    self.update_dataframe()
+                else:
+                    self._dataframe = cache_df
+            if self._need_to_update_dataframe():
                 self.update_dataframe()
             return self._dataframe
 
@@ -372,8 +395,9 @@ class GoogleSheetWorker:
             row_sets.append(set(rows))
         return set.intersection(*row_sets)
 
-    def _find_rows_by_cache(self, row_values: dict):
+    def _find_rows_by_cache(self, row_values: dict, **kwargs):
         self.logger.debug(f'Finding rows by values {row_values} [cache]')
+        after_cache_update = kwargs.get('after_cache_update')
         rows = set(self.aliased_dataframe.loc[(
                            self.aliased_dataframe[row_values.keys()].astype(str) == pd.Series(row_values).astype(str)
                        ).all(axis=1)
@@ -385,14 +409,19 @@ class GoogleSheetWorker:
                 if str(cell_value) != str(v):
                     self.logger.info(f'Cell values mismatch {v} - {cell_value}. Updating dataframe and repeat...')
                     self.update_dataframe()
-                    return self._find_rows_by_cache(row_values)
+                    return self._find_rows_by_cache(row_values, after_cache_update=True)
+        if len(rows) == 0:
+            if after_cache_update:
+                raise CellNotFound(f'Not found row with values {row_values}')
+            else:
+                self.logger.debug('Cell not found, update cache')
+                self.update_dataframe()
+                return self._find_rows_by_cache(row_values=row_values, after_cache_update=True)
         return rows
 
-    def update_row_by_id(self, id_values: dict, update_values: dict):
+    def update_row_by_id(self, id_values: dict, update_values: dict, **kwargs):
         self.logger.debug(f'Updating rows {id_values} - {update_values}')
         id_rows = self.find_rows_by_values(id_values)
-        if len(id_rows) == 0:
-            raise CellNotFound(f'Not found row with values {id_values}')
         for k,v in update_values.items():
             value_col = self.find_column(k)
             for value_row in id_rows:

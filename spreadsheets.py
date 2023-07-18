@@ -84,11 +84,9 @@ class GoogleSheetWorker:
         if strat == GoogleSheetRowSearchStrategy.CACHE:
             self.find_rows_by_values = self._find_rows_by_cache
             self.get_unique_values = self._get_unique_by_cache
-            self.get_headers = self._get_headers_by_cache
         elif strat == GoogleSheetRowSearchStrategy.REQUEST:
             self.find_rows_by_values = self._find_rows_by_request
             self.get_unique_values = self._get_unique_by_request
-            self.get_headers = self._get_headers_by_request
 
     @property
     def search_strategy(self):
@@ -190,16 +188,13 @@ class GoogleSheetWorker:
     def set_headers(self, values):
         self.sheet.insert_row(values, self.header_row)
 
-    def _get_headers_by_request(self):
+    def get_headers(self):
         r = self.sheet.get(f'{self.header_row}:{self.header_row}')
         return r[0]
 
-    def _get_headers_by_cache(self):
-        return list(self.dataframe.columns)
-    
     def get_aliased_headers(self):
         a = self.reverse_aliases
-        return [a[k] for k in self.get_headers()]
+        return [a[k] if k in a else k for k in self.get_headers()]
 
     def get_worksheet_filters(self):
         r = self.api_service.get(spreadsheetId=self.spread_id).execute()
@@ -248,7 +243,7 @@ class GoogleSheetWorker:
         # в противном случае кэшируем только нужные колонки для экономии памяти
         else:
             # находим индексы нужных нам колонок
-            headers = self._get_headers_by_request()
+            headers = self.get_headers()
             req_ranges = []
             for alias_col in self.aliases.values():
                 icol = headers.index(alias_col) + 1
@@ -434,22 +429,10 @@ class GoogleSheetWorker:
     def insert_row_by_id(self, insert_values):
         # todo обновить функцию
         raise NotImplementedError()
-        # ws = self.sheet
-        # header_values = self.get_headers()
-        # insert_values_sorted = []
-        # for h in header_values:
-        #     insert_value = insert_values.get(h, None)
-        #     insert_value = self.value_formatter(insert_value)
-        #     insert_values_sorted.append(insert_value)
-        # if ws.row_count <= 1:
-        #     ws.add_rows(1)
-        # ws.insert_row(insert_values_sorted, index=2)
 
     def delete_row_by_id(self, id_values):
         # todo проверить корректность удаления (смещение массива)
         raise NotImplementedError()
-        # for row in self.find_rows_by_values(id_values):
-        #     ws.delete_row(row)
 
     def _get_unique_by_request(self, column_index, include_header=False):
         v = self.sheet.col_values(column_index)

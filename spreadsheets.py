@@ -4,7 +4,7 @@ import string
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import chain
+from itertools import chain, zip_longest
 from typing import Any, Optional
 import dateutil.parser
 import pandas as pd
@@ -52,7 +52,6 @@ class GoogleSheetWorker:
         self.datetime_format = '%Y-%m-%d %H:%M:%S'
         self._search_strategy = None
         self.search_strategy = search_strategy
-        self._aliases = None
         self.aliases = aliases
         self.header_row = header_row
 
@@ -99,14 +98,6 @@ class GoogleSheetWorker:
     def search_strategy(self, strat):
         self.__define_strategy(strat)
         self._search_strategy = strat
-
-    @property
-    def aliases(self):
-        return self._aliases
-
-    @aliases.setter
-    def aliases(self, alias):
-        self._aliases = alias
 
     @property
     def reverse_aliases(self):
@@ -244,20 +235,31 @@ class GoogleSheetWorker:
     def _need_to_update_dataframe(self):
         conditions = []
         conditions.append(self.sheet.row_count != self._dataframe.shape[0] + self.header_row)
-        conditions.append(self.sheet.col_count != self._dataframe.shape[1])
+        # conditions.append(self.sheet.col_count != self._dataframe.shape[1])
         return any(conditions)
 
     def update_dataframe(self):
         self.logger.debug(f'Update dataframe by thread {get_ident()}')
         self.refresh_sheet()
-        # gspread_dataframe уродует типы данных, поэтому делаем все сами
-        values = self.sheet.get_all_values()
-        # внимание костыль
-        # делаем размер датафрейма соответствующим размерам таблицы
-        # чтобы не тригерить обновление кэша из-за несовпадения размера
-        # (в таблицах где есть пустые строки или столбцы это происходит)
-        for i in range(self.sheet.row_count - len(values)):
-            values.append([np.nan] * self.sheet.col_count)
+        # собираем всю таблицу если нет определенных колонок
+        if self.aliases is None:
+            # gspread_dataframe уродует типы данных, поэтому делаем все сами
+            values = self.sheet.get_all_values()
+        # в противном случае кэшируем только нужные колонки для экономии памяти
+        else:
+            # находим индексы нужных нам колонок
+            headers = self._get_headers_by_request()
+            req_ranges = []
+            for alias_col in self.aliases.values():
+                icol = headers.index(alias_col) + 1
+                acol = get_column_letter(icol)
+                req_ranges.append(f'{acol}:{acol}')
+            # собираем данные по колонкам одним запросом
+            raw_values = self.sheet.batch_get(req_ranges)
+            # форматируем данные
+            values = []
+            for row in zip_longest(*raw_values, fillvalue=['']):
+                values.append(list(chain.from_iterable(row)))
         df = pd.DataFrame(values)
         df.index += 1
         df.columns = df.iloc[self.header_row-1]
@@ -278,8 +280,9 @@ class GoogleSheetWorker:
                     self.update_dataframe()
                 else:
                     self._dataframe = cache_df
-            if self._need_to_update_dataframe():
-                self.update_dataframe()
+            # todo возможно нужно убрать, так как логика с сопоставлением размера таблицы корявая, перепроверка кэша справляется лучше
+            # if self._need_to_update_dataframe():
+            #     self.update_dataframe()
             return self._dataframe
 
     @property

@@ -1,8 +1,13 @@
 import httplib2
 from googleapiclient.discovery import build
 from pydrive.drive import GoogleDrive
-from google_workers.api import auth
+from google_workers.api import auth, get_service
+from googleapiclient.http import MediaFileUpload
+from pathlib import Path
+from typing import Union
+import google_auth_httplib2
 
+PAGE_SIZE = 500
 
 class GoogleAuthCopycat:
     '''GoogleAuth из модуля pydrive имеет странный механизм сохранения токена,
@@ -32,74 +37,107 @@ class GoogleDriveWorker:
         self.creds = auth()
         self.gauth = GoogleAuthCopycat(self.creds)
         self.drive = GoogleDrive(self.gauth)
+        self.API = get_service('drive')
 
-    def get_folder_contents(self, folder_id):
-        # a = ' and '
-        query = f"'{folder_id}' in parents and trashed=false"
-        params = {
-            'q': query,
-            'supportsAllDrives': True,
-            'includeItemsFromAllDrives': True
+    def thread_safety_execute(self, q):
+        # для поддержки мультипоточности
+        # https://googleapis.github.io/google-api-python-client/docs/thread_safety.html
+        http = httplib2.Http()
+        http = self.creds.authorize(http)
+        r = q.execute(http=http)
+        return r
+
+    def iter_folders_in_folder(self, folder_id: str):
+        pageToken = None
+        q = "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'".format(folder_id)
+        while True:
+            result = self.API.files().list(
+                q=q,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                pageSize=PAGE_SIZE,
+                pageToken=pageToken,
+            ).execute()
+            for i in result['files']:
+                yield i
+            pageToken = result.get('nextPageToken')
+            if not pageToken:
+                break
+
+    def iter_files_in_folder(self, folder_id: str, deep: str = False, q: str = None):
+        pageToken = None
+        # https://developers.google.com/drive/api/guides/ref-search-terms
+        full_query = "'{}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'".format(
+            folder_id)
+        if q:
+            full_query = full_query + " and " + q
+        while True:
+            result = self.API.files().list(
+                q=full_query,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+                pageSize=PAGE_SIZE,
+                pageToken=pageToken,
+            ).execute()
+            for file in result['files']:
+                yield file
+            pageToken = result.get('nextPageToken')
+            if not pageToken:
+                break
+        if deep:
+            for folder in self.iter_folders_in_folder(folder_id=folder_id):
+                yield from self.iter_files_in_folder(folder_id=folder["id"], deep=deep, q=q)
+
+    def create_folder(self, folder_name, parent_folder_id):
+        file_metadata = {
+            'name': folder_name,
+            'parents': [parent_folder_id],
+            'mimeType': 'application/vnd.google-apps.folder'
         }
-        return self.drive.ListFile(params).GetList()
+        folder = API.files().create(body=file_metadata, fields='id', supportsAllDrives=True).execute()
+        return folder
 
-    def upload_file(self, filepath, folder_id, new_title=None, team_drive_id=None, if_exists='raise'):
-        upload_meta = {}
-        if team_drive_id:
-            upload_meta['parents'] = [{'id': folder_id, 'teamDriveId': team_drive_id}]
-            upload_params = {'supportsTeamDrives': True}
-        else:
-            upload_meta['parents'] = [{'id': folder_id}]
-            upload_params = None
-        if new_title:
-            upload_meta['title'] = new_title
-        else:
-            upload_meta['title'] = filepath.name
+    def search_file_by_name(self, folder_id: str, file_name: str):
+        yield from self.iter_files_in_folder(folder_id=folder_id, q=f"name='{file_name}'")
 
-        files = self.get_folder_contents(folder_id)
-        same_name_files = [i for i in files if i['title'] == upload_meta['title'] and 'downloadUrl' in i]
-        if same_name_files:
-            if if_exists == 'raise':
-                raise AttributeError('На диске существует файл с таким же именем')
-            elif if_exists == 'replace':
-                for f in same_name_files:
-                    f.Trash(upload_params)
-                    if upload_params:
-                        del upload_params['fileId']
-            elif if_exists == 'ignore':
-                pass
-            else:
-                raise TypeError('Неверный аргумент "if_exists"')
+    def move_file(self, file, to_folder_id: str):
+        fileId = file['id']
+        file_meta = self.get_file_meta(file, 'parents')
+        if to_folder_id in file_meta['parents']:
+            return
+        prev_parents = ",".join(file_meta["parents"])
+        file = self.thread_safety_execute(
+            self.API.files().update(
+                fileId=fileId,
+                removeParents=prev_parents,
+                addParents=to_folder_id,
+                fields='id',
+                supportsAllDrives=True)
+        )
+        return file
 
-        file = self.drive.CreateFile(upload_meta)
-        file.SetContentFile(str(filepath))
-        file.Upload(upload_params)
-        file.content.close()
-        logger.debug('Uploaded!')
-        return file['embedLink']
+    def get_file_meta(self, file, fields):
+        file_meta = self.thread_safety_execute(
+            self.API.files().get(fileId=file['id'], fields=fields, supportsAllDrives=True))
+        return file_meta
 
-    def download_file(self, folder_id, filename, output_folder):
-        files = self.get_folder_contents(folder_id)
-        files_to_download = [i for i in files if i['title'] == filename and 'downloadUrl' in i]
-        if len(files_to_download) > 1:
-            logger.warning('На диске больше одного файла с таким названием')
-        if files_to_download:
-            for file in files_to_download:
-                file.GetContentFile(output_folder / filename)
-        else:
-            raise TypeError(f'Не найден файл {filename} в папке {folder_id} на диске')
+    def get_file_bytes(self, file):
+        return self.API.files().get_media(fileId=file['id'], supportsAllDrives=True).execute()
 
-    def download_folder(self, folder_id, output_folder):
-        files = self.get_folder_contents(folder_id)
-        files_to_download = [i for i in files if 'downloadUrl' in i]
-        if files_to_download:
-            for file in files_to_download:
-                file.GetContentFile(output_folder / file['title'])
+    def upload_file(self, filepath: Union[str, Path], folder_id: str):
+        filepath = Path(filepath)
+        file_metadata = {
+            'name': filepath.name,
+            'parents': [folder_id],
+        }
+        media = MediaFileUpload(filepath)
+        file = self.API.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+        return file
 
-    def get_file_link(self, folder_id, file_name):
-        files = self.get_folder_contents(folder_id)
-        needed_files = [i for i in files if i['title'] == file_name]
-        if needed_files:
-            return needed_files[0]['embedLink']
-        else:
-            logger.error(f'File {file_name} not found in folder {folder_id}!')
+    def download_file(self, file, folder: Union[str, Path]):
+        with open(Path(folder) / file['name'], 'wb') as f:
+            f.write(self.get_file_bytes(file))
+
+    def delete_file(self, file):
+        file = self.API.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
+        return file

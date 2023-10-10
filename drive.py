@@ -154,7 +154,7 @@ class GoogleDriveWorker:
     def download_file(self, file, folder: Union[str, Path], filename: Optional[str] = None):
         filename = file.get("name") if filename is None else filename
         if filename is None:
-            filename = "".join(x for x in file['id'] if x.isalnum())
+            filename = self.get_file_meta(file, 'name')['name']
         folder = Path(folder)
         folder.mkdir(exist_ok=True, parents=True)
         with open(folder / filename, 'wb') as f:

@@ -53,8 +53,9 @@ def auth():
     return oauth_creds
 
 
-def get_service(service_name):
-    creds = auth()
+def get_service(service_name, creds=None):
+    if creds is None:
+        creds = auth()
     if service_name == 'slides':
         return build(service_name, 'v1', credentials=creds).presentations()
     elif service_name == 'sheets':

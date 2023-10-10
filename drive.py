@@ -4,7 +4,7 @@ from pydrive.drive import GoogleDrive
 from google_workers.api import auth, get_service
 from googleapiclient.http import MediaFileUpload
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 import google_auth_httplib2
 
 PAGE_SIZE = 500
@@ -19,7 +19,7 @@ class GoogleAuthCopycat:
 
     def __init__(self, creds):
         self.credentials = creds
-        self.service = build('drive', 'v2', credentials=self.credentials)
+        self.service = build('drive', 'v3', credentials=self.credentials)
         self.http_timeout = None
 
     @property
@@ -33,13 +33,20 @@ class GoogleAuthCopycat:
 
 
 class GoogleDriveWorker:
-    def __init__(self):
-        self.creds = auth()
-        self.gauth = GoogleAuthCopycat(self.creds)
-        self.drive = GoogleDrive(self.gauth)
-        self.API = get_service('drive')
+    def __init__(self, credentials=None, support_all_drives=True):
+        if credentials is None:
+            self.creds = auth()
+        else:
+            self.creds = credentials
+        self.support_all_drives = support_all_drives
+        # deprecated: use service instead pydrive
+        # self.gauth = GoogleAuthCopycat(self.creds)
+        # self.drive = GoogleDrive(self.gauth)
+        self.API = get_service('drive', self.creds)
 
-    def thread_safety_execute(self, q):
+    def _api_execute(self, method: str, **kwargs):
+        method_func = getattr(self.API.files(), method)
+        q = method_func(supportsAllDrives=self.support_all_drives, **kwargs)
         # для поддержки мультипоточности
         # https://googleapis.github.io/google-api-python-client/docs/thread_safety.html
         http = httplib2.Http()
@@ -51,13 +58,13 @@ class GoogleDriveWorker:
         pageToken = None
         q = "'{}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'".format(folder_id)
         while True:
-            result = self.API.files().list(
+            result = self._api_execute(
+                'list',
                 q=q,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
+                includeItemsFromAllDrives=self.support_all_drives,
                 pageSize=PAGE_SIZE,
                 pageToken=pageToken,
-            ).execute()
+            )
             for i in result['files']:
                 yield i
             pageToken = result.get('nextPageToken')
@@ -72,13 +79,13 @@ class GoogleDriveWorker:
         if q:
             full_query = full_query + " and " + q
         while True:
-            result = self.API.files().list(
+            result = self._api_execute(
+                "list",
                 q=full_query,
-                includeItemsFromAllDrives=True,
-                supportsAllDrives=True,
+                includeItemsFromAllDrives=self.support_all_drives,
                 pageSize=PAGE_SIZE,
                 pageToken=pageToken,
-            ).execute()
+            )
             for file in result['files']:
                 yield file
             pageToken = result.get('nextPageToken')
@@ -94,7 +101,7 @@ class GoogleDriveWorker:
             'parents': [parent_folder_id],
             'mimeType': 'application/vnd.google-apps.folder'
         }
-        folder = API.files().create(body=file_metadata, fields='id', supportsAllDrives=True).execute()
+        folder = self._api_execute("create", body=file_metadata, fields='id')
         return folder
 
     def search_file_by_name(self, folder_id: str, file_name: str):
@@ -106,23 +113,28 @@ class GoogleDriveWorker:
         if to_folder_id in file_meta['parents']:
             return
         prev_parents = ",".join(file_meta["parents"])
-        file = self.thread_safety_execute(
-            self.API.files().update(
-                fileId=fileId,
-                removeParents=prev_parents,
-                addParents=to_folder_id,
-                fields='id',
-                supportsAllDrives=True)
+        file = self._api_execute(
+            "update",
+            fileId=fileId,
+            removeParents=prev_parents,
+            addParents=to_folder_id,
+            fields='id',
         )
         return file
 
     def get_file_meta(self, file, fields):
-        file_meta = self.thread_safety_execute(
-            self.API.files().get(fileId=file['id'], fields=fields, supportsAllDrives=True))
+        file_meta = self._api_execute(
+            "get",
+            fileId=file['id'],
+            fields=fields,
+        )
         return file_meta
 
     def get_file_bytes(self, file):
-        return self.API.files().get_media(fileId=file['id'], supportsAllDrives=True).execute()
+        return self._api_execute(
+            "get_media",
+            fileId=file['id'],
+        )
 
     def upload_file(self, filepath: Union[str, Path], folder_id: str):
         filepath = Path(filepath)
@@ -131,13 +143,37 @@ class GoogleDriveWorker:
             'parents': [folder_id],
         }
         media = MediaFileUpload(filepath)
-        file = self.API.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
+        file = self._api_execute(
+            "create",
+            body=file_metadata,
+            media_body=media,
+            fields='id',
+        )
         return file
 
-    def download_file(self, file, folder: Union[str, Path]):
-        with open(Path(folder) / file['name'], 'wb') as f:
+    def download_file(self, file, folder: Union[str, Path], filename: Optional[str] = None):
+        filename = file.get("name") if filename is None else filename
+        if filename is None:
+            filename = "".join(x for x in file['id'] if x.isalnum())
+        folder = Path(folder)
+        folder.mkdir(exist_ok=True, parents=True)
+        with open(folder / filename, 'wb') as f:
             f.write(self.get_file_bytes(file))
 
     def delete_file(self, file):
-        file = self.API.files().delete(fileId=file['id'], supportsAllDrives=True).execute()
+        '''If the file belongs to a shared drive, the user must be an organizer on the parent folder'''
+        file = self._api_execute(
+            "delete",
+            fileId=file['id'],
+        )
+        return file
+
+    def trash_file(self, file):
+        file = self._api_execute(
+            "update",
+            fileId = file['id'],
+            body = {
+                "trashed": True,
+            }
+        )
         return file

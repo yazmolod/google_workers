@@ -151,14 +151,16 @@ class GoogleDriveWorker:
         )
         return file
 
-    def download_file(self, file, folder: Union[str, Path], filename: Optional[str] = None):
+    def download_file(self, file, folder: Union[str, Path], filename: Optional[str] = None) -> Path:
         filename = file.get("name") if filename is None else filename
         if filename is None:
             filename = self.get_file_meta(file, 'name')['name']
         folder = Path(folder)
         folder.mkdir(exist_ok=True, parents=True)
-        with open(folder / filename, 'wb') as f:
+        new_file = folder / filename
+        with open(new_file, 'wb') as f:
             f.write(self.get_file_bytes(file))
+        return new_file
 
     def delete_file(self, file):
         '''If the file belongs to a shared drive, the user must be an organizer on the parent folder'''

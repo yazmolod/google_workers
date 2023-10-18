@@ -42,6 +42,7 @@ class GoogleSheetWorker:
             search_strategy=GoogleSheetRowSearchStrategy.CACHE,
             aliases=None,
             header_row=1,
+            credentials=None
             ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -55,7 +56,7 @@ class GoogleSheetWorker:
         self.aliases = aliases
         self.header_row = header_row
 
-        self.credentials = auth()
+        self.credentials = credentials if credentials is not None else auth()
         self.gspread_client = gspread.authorize(self.credentials)
         self.api_service = get_service('sheets')
 

@@ -1,47 +1,17 @@
 import httplib2
 from googleapiclient.discovery import build
-from pydrive.drive import GoogleDrive
 from google_workers.api import auth, get_service
 from googleapiclient.http import MediaFileUpload
 from pathlib import Path
 from typing import Union, Optional
-import google_auth_httplib2
 
 PAGE_SIZE = 500
-
-class GoogleAuthCopycat:
-    '''GoogleAuth из модуля pydrive имеет странный механизм сохранения токена,
-    из-за чего он становится неуниверсальным для других оболочек для google-api.
-    Однако, pydrive.GoogleDrive требует этот класс для инициализации. Чтобы решить эту проблему, реализован этот класс,
-    который быстро настраивается при помощи oauth2client.client.GoogleCredentials (или google.oauth2.credentials.Credentials)
-    и в дальнейшем имитирует его методы и свойства
-'''
-
-    def __init__(self, creds):
-        self.credentials = creds
-        self.service = build('drive', 'v3', credentials=self.credentials)
-        self.http_timeout = None
-
-    @property
-    def access_token_expired(self):
-        return False
-
-    def Get_Http_Object(self):
-        http = httplib2.Http(timeout=self.http_timeout)
-        http = self.credentials.authorize(http)
-        return http
 
 
 class GoogleDriveWorker:
     def __init__(self, credentials=None, support_all_drives=True):
-        if credentials is None:
-            self.creds = auth()
-        else:
-            self.creds = credentials
+        self.creds = credentials if credentials is not None else auth()
         self.support_all_drives = support_all_drives
-        # deprecated: use service instead pydrive
-        # self.gauth = GoogleAuthCopycat(self.creds)
-        # self.drive = GoogleDrive(self.gauth)
         self.API = get_service('drive', self.creds)
 
     def _api_execute(self, method: str, **kwargs):

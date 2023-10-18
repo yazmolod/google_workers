@@ -17,7 +17,7 @@ GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/gmail.settings.basic',
     'https://www.googleapis.com/auth/drive',
 ]
-GOOGLE_SECRET = json.loads((Path(__file__).parent.resolve() / 'configs' / 'google_secret.json').read_bytes())
+GOOGLE_SECRET_PATH = Path(__file__).parent.resolve() / 'configs' / 'google_secret.json'
 
 def auth():
     creds = None
@@ -30,7 +30,12 @@ def auth():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_config(GOOGLE_SECRET, GOOGLE_SCOPES)
+            assert GOOGLE_SECRET_PATH.exists(), "Use should use your own credentials in kwargs " \
+                                                f"or create {GOOGLE_SECRET_PATH}. " \
+                                                f"How to get it: " \
+                                                f"https://pythonhosted.org/PyDrive/quickstart.html#authentication"
+            google_secret = json.loads(GOOGLE_SECRET_PATH.read_bytes())
+            flow = InstalledAppFlow.from_client_config(google_secret, GOOGLE_SCOPES)
             # creds = flow.run_console()
             creds = flow.run_local_server()
         with open(GOOGLE_TOKEN_PATH, 'w') as token:

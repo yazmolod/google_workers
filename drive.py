@@ -149,3 +149,13 @@ class GoogleDriveWorker:
             }
         )
         return file
+    
+    def untrash_file(self, file):
+        file = self._api_execute(
+            "update",
+            fileId = file['id'],
+            body = {
+                "trashed": False,
+            }
+        )
+        return file

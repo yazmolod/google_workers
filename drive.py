@@ -1,9 +1,11 @@
 import httplib2
 from googleapiclient.discovery import build
 from google_workers.api import auth, get_service
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 from pathlib import Path
 from typing import Union, Optional
+from io import BytesIO
+import mimetypes
 
 PAGE_SIZE = 500
 
@@ -41,7 +43,7 @@ class GoogleDriveWorker:
             if not pageToken:
                 break
 
-    def iter_files_in_folder(self, folder_id: str, deep: str = False, q: str = None):
+    def iter_files_in_folder(self, folder_id: str, deep: bool = False, q: str = None):
         pageToken = None
         # https://developers.google.com/drive/api/guides/ref-search-terms
         full_query = "'{}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'".format(
@@ -65,7 +67,7 @@ class GoogleDriveWorker:
             for folder in self.iter_folders_in_folder(folder_id=folder_id):
                 yield from self.iter_files_in_folder(folder_id=folder["id"], deep=deep, q=q)
 
-    def create_folder(self, folder_name, parent_folder_id):
+    def create_folder(self, folder_name: str, parent_folder_id: str):
         file_metadata = {
             'name': folder_name,
             'parents': [parent_folder_id],
@@ -113,6 +115,25 @@ class GoogleDriveWorker:
             'parents': [folder_id],
         }
         media = MediaFileUpload(filepath)
+        file = self._api_execute(
+            "create",
+            body=file_metadata,
+            media_body=media,
+            fields='id',
+        )
+        return file
+    
+    def upload_bytes(self, filename: str, bytes_: bytes, folder_id: str):
+        # копипаст из MediaFileUpload для определения mimetype
+        mimetype, _ = mimetypes.guess_type(filename)
+        if mimetype is None:
+            # Guess failed, use octet-stream.
+            mimetype = "application/octet-stream"
+        file_metadata = {
+            'name': filename,
+            'parents': [folder_id],
+        }
+        media = MediaIoBaseUpload(fd=BytesIO(bytes_), mimetype=mimetype, resumable=True)
         file = self._api_execute(
             "create",
             body=file_metadata,

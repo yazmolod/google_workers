@@ -123,6 +123,16 @@ class GoogleDriveWorker:
         )
         return file
     
+    def upload_folder(self, folderpath: Union[str, Path], parent_folder_id: str):
+        folderpath = Path(folderpath)
+        gd_folder = self.create_folder(folderpath.name, parent_folder_id)
+        for file in folderpath.glob('*'):
+            if file.is_dir():
+                self.upload_folder(file, gd_folder['id'])
+            else:
+                gd_file = self.upload_file(file, gd_folder['id'])
+        return gd_folder
+    
     def upload_bytes(self, filename: str, bytes_: bytes, folder_id: str):
         # копипаст из MediaFileUpload для определения mimetype
         mimetype, _ = mimetypes.guess_type(filename)

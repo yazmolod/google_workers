@@ -146,6 +146,7 @@ class GoogleSheetWorker:
     def _save_cache(self) -> None:
         self.logger.debug('Save cache...')
         cache_path = self._get_cache_filepath()
+        cache_path.parent.mkdir(exist_ok=True)
         self._dataframe.to_pickle(cache_path)
 
     def _load_cache(self) -> Optional[pd.DataFrame]:
@@ -252,6 +253,12 @@ class GoogleSheetWorker:
                 req_ranges.append(f'{acol}:{acol}')
             # собираем данные по колонкам одним запросом
             raw_values = self.sheet.batch_get(req_ranges)
+            # заполняем пустые массивы, чтобы они не пропадали в chain
+            # не сбивая тем самым матрицу
+            for cv in raw_values:
+                for rv in cv:
+                    if len(rv) == 0:
+                        rv.append('')
             # форматируем данные
             values = []
             for row in zip_longest(*raw_values, fillvalue=['']):

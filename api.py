@@ -36,8 +36,10 @@ def auth():
                                                 f"https://pythonhosted.org/PyDrive/quickstart.html#authentication"
             google_secret = json.loads(GOOGLE_SECRET_PATH.read_bytes())
             flow = InstalledAppFlow.from_client_config(google_secret, GOOGLE_SCOPES)
-            # creds = flow.run_console()
-            creds = flow.run_local_server()
+            try:
+                creds = flow.run_local_server()
+            except OSError:
+                creds = flow.run_console()
         with open(GOOGLE_TOKEN_PATH, 'w') as token:
             token.write(creds.to_json())
     json_creds = json.loads(creds.to_json())

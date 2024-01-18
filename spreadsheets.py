@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import chain, zip_longest
-from typing import Any, Optional
+from typing import Any, Optional, List, Set, Iterable
 import dateutil.parser
 import pandas as pd
 import numpy as np
@@ -392,7 +392,7 @@ class GoogleSheetWorker:
         cells = self.sheet.findall(str(row_value), in_column=col_index)
         return [i.row for i in cells]
 
-    def _find_rows_by_request(self, row_values: dict):
+    def _find_rows_by_request(self, row_values: dict) -> Set[int]:
         '''Get row indexes which contain values in many column in same time'''
         self.logger.debug(f'Finding rows by values {row_values} [request]')
         row_sets = []
@@ -401,7 +401,7 @@ class GoogleSheetWorker:
             row_sets.append(set(rows))
         return set.intersection(*row_sets)
 
-    def _find_rows_by_cache(self, row_values: dict, **kwargs):
+    def _find_rows_by_cache(self, row_values: dict, **kwargs) -> Set[int]:
         self.logger.debug(f'Finding rows by values {row_values} [cache]')
         after_cache_update = kwargs.get('after_cache_update')
         rows = set(self.aliased_dataframe.loc[(
@@ -424,15 +424,20 @@ class GoogleSheetWorker:
                 self.update_dataframe()
                 return self._find_rows_by_cache(row_values=row_values, after_cache_update=True)
         return rows
+    
+    def update_rows(self, rows: Iterable[int], update_values: dict, **kwargs):
+        self.logger.debug(f'Updating row {rows} - {update_values}')
+        for k,v in update_values.items():
+            value_col = self.find_column(k)
+            for value_row in rows:
+                v = self.value_formatter(v)
+                self.sheet.update_cell(value_row, value_col, v)
 
     def update_row_by_id(self, id_values: dict, update_values: dict, **kwargs):
         self.logger.debug(f'Updating rows {id_values} - {update_values}')
         id_rows = self.find_rows_by_values(id_values)
-        for k,v in update_values.items():
-            value_col = self.find_column(k)
-            for value_row in id_rows:
-                v = self.value_formatter(v)
-                self.sheet.update_cell(value_row, value_col, v)
+        self.update_rows(id_rows, update_values)
+
 
     def insert_row_by_id(self, insert_values):
         # todo обновить функцию

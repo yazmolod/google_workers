@@ -39,7 +39,7 @@ def auth():
             try:
                 creds = flow.run_local_server()
             except OSError:
-                creds = flow.run_console()
+                creds = flow.authorization_url()
         with open(GOOGLE_TOKEN_PATH, 'w') as token:
             token.write(creds.to_json())
     json_creds = json.loads(creds.to_json())
